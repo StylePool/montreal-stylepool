@@ -4,21 +4,21 @@ const PLAN_CONFIG = {
   monthly: {
     name: 'StylePool MTL — Monthly Unlimited Pool Pass',
     description: 'Unlimited pooled clothing orders across Montreal brands.',
-    unitAmountCents: 599, // $5.99 CAD
+    unitAmountCents: 599,
     mode: 'subscription',
     interval: 'month',
   },
   annual: {
     name: 'StylePool MTL — Annual Pool Pass',
     description: 'Year-round pooled clothing orders across Montreal brands.',
-    unitAmountCents: 4900, // $49.00 CAD
+    unitAmountCents: 4900,
     mode: 'subscription',
     interval: 'year',
   },
   single: {
     name: 'StylePool MTL — Single Order Trial Pass',
     description: 'One-time pooled clothing order pass with $0 shipping.',
-    unitAmountCents: 249, // $2.49 CAD
+    unitAmountCents: 249,
     mode: 'payment',
     interval: null,
   },
@@ -41,10 +41,14 @@ export default async function handler(req, res) {
 
   try {
     const stripe = new Stripe(secretKey);
-    const origin =
-      req.headers.origin ||
-      `https://${req.headers.host}` ||
-      'http://localhost:5173';
+
+    // Ensure mobile apps (capacitor://localhost) use the public https:// link for Stripe redirects
+    const rawOrigin = req.headers.origin || '';
+    const isWebOrigin =
+      rawOrigin.startsWith('https://') && !rawOrigin.includes('localhost');
+    const baseUrl =
+      process.env.PUBLIC_APP_URL ||
+      (isWebOrigin ? rawOrigin : `https://${req.headers.host}`);
 
     const priceData = {
       currency: 'cad',
@@ -64,18 +68,13 @@ export default async function handler(req, res) {
       mode: selectedPlan.mode,
       customer_email: clientEmail || undefined,
       client_reference_id: clientId || undefined,
-      line_items: [
-        {
-          price_data: priceData,
-          quantity: 1,
-        },
-      ],
+      line_items: [{ price_data: priceData, quantity: 1 }],
       metadata: {
         planId,
         clientId: clientId || '',
       },
-      success_url: `${origin}/?payment=success&plan=${planId}&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${origin}/?payment=cancelled`,
+      success_url: `${baseUrl}/?payment=success&plan=${planId}&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}/?payment=cancelled`,
     });
 
     return res.status(200).json({

@@ -41,6 +41,9 @@ import {
   orderBy,
 } from 'firebase/firestore';
 
+// Base URL for API calls (empty on same-domain web, or https://montreal-stylepool.onrender.com on iOS/Android)
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+
 // Initialize Stripe frontend SDK with your pk_ key
 const stripePublishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY || '';
 const stripePromise = stripePublishableKey.startsWith('pk_')
@@ -199,7 +202,7 @@ export default function App() {
     }
   };
 
-  // Start Stripe Checkout using pk_ and /api/create-checkout-session (sk_)
+  // Start Stripe Checkout using pk_ and ${API_BASE_URL}/api/create-checkout-session (sk_)
   const handleStartStripeCheckout = async (planId) => {
     if (!currentUser) {
       setAuthForm((prev) => ({ ...prev, subscriptionPlan: planId }));
@@ -216,7 +219,7 @@ export default function App() {
 
     setStripeLoading(true);
     try {
-      const response = await fetch('/api/create-checkout-session', {
+      const response = await fetch(`${API_BASE_URL}/api/create-checkout-session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -437,7 +440,7 @@ export default function App() {
       }
 
       if (newOrderedStatus) {
-        const response = await fetch('/api/send-order-confirmation', {
+        const response = await fetch(`${API_BASE_URL}/api/send-order-confirmation`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -596,6 +599,28 @@ export default function App() {
             )}
           </div>
         </div>
+
+        {/* Mobile View Switcher for iOS & Android Screens */}
+        {currentUser && (
+          <div className="flex md:hidden border-t border-slate-100 bg-slate-50 px-4 py-1.5 gap-2">
+            <button
+              onClick={() => setActiveView('client')}
+              className={`flex-1 py-1.5 rounded text-xs font-semibold ${
+                activeView === 'client' ? 'bg-indigo-600 text-white' : 'text-slate-600'
+              }`}
+            >
+              Client Profile
+            </button>
+            <button
+              onClick={() => setActiveView('admin')}
+              className={`flex-1 py-1.5 rounded text-xs font-semibold ${
+                activeView === 'admin' ? 'bg-indigo-600 text-white' : 'text-slate-600'
+              }`}
+            >
+              Admin Dashboard ({orders.filter((o) => !o.ordered).length})
+            </button>
+          </div>
+        )}
       </header>
 
       {!currentUser ? (
@@ -637,6 +662,30 @@ export default function App() {
                   >
                     Preview Admin Dashboard
                   </button>
+                </div>
+
+                <div className="grid sm:grid-cols-3 gap-4 pt-6 border-t border-slate-200">
+                  <div className="flex items-start gap-2.5">
+                    <ShieldCheck className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
+                    <div className="text-xs text-slate-600">
+                      <strong className="text-slate-900 block">Verified Montreal Profiles</strong>
+                      Address, postal code & phone checked on sign-up.
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2.5">
+                    <Layers className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
+                    <div className="text-xs text-slate-600">
+                      <strong className="text-slate-900 block">14+ Clothing Brands</strong>
+                      Grouped daily to pass store free-shipping minimums.
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2.5">
+                    <Mail className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
+                    <div className="text-xs text-slate-600">
+                      <strong className="text-slate-900 block">Instant Email Proof</strong>
+                      Automatic email sent the second your item is ordered.
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -935,9 +984,30 @@ export default function App() {
                         {ord.itemName}
                       </div>
                       <div className="text-xs text-slate-600 mt-1 flex flex-wrap gap-3">
-                        <span>Size: <strong>{ord.itemSize}</strong></span>
-                        <span>Color: <strong>{ord.itemColor}</strong></span>
-                        <span>Price: <strong>${Number(ord.itemPrice).toFixed(2)} CAD</strong></span>
+                        <span>
+                          Size: <strong>{ord.itemSize}</strong>
+                        </span>
+                        <span>
+                          Color: <strong>{ord.itemColor}</strong>
+                        </span>
+                        <span>
+                          Price: <strong>${Number(ord.itemPrice).toFixed(2)} CAD</strong>
+                        </span>
+                      </div>
+                      <div className="mt-2.5 flex items-center justify-between text-xs">
+                        <a
+                          href={ord.productUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-indigo-600 hover:underline inline-flex items-center gap-1 font-medium"
+                        >
+                          View Item Link <ExternalLink className="w-3 h-3" />
+                        </a>
+                        {ord.orderedAt && (
+                          <span className="text-emerald-700 font-medium">
+                            Ordered {new Date(ord.orderedAt).toLocaleDateString()}
+                          </span>
+                        )}
                       </div>
                     </div>
                   ))
@@ -1028,6 +1098,7 @@ export default function App() {
                           </a>
                           <button
                             type="button"
+                            disabled={processingOrderId === ord.id}
                             onClick={() => handleToggleOrderPlaced(ord)}
                             className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold ${
                               ord.ordered
@@ -1208,6 +1279,25 @@ export default function App() {
                   <p className="text-[11px] text-rose-600 mt-1">{authErrors.password}</p>
                 )}
               </div>
+
+              {authModal === 'signup' && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Subscription Plan
+                  </label>
+                  <select
+                    value={authForm.subscriptionPlan}
+                    onChange={(e) =>
+                      setAuthForm({ ...authForm, subscriptionPlan: e.target.value })
+                    }
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-sm bg-white"
+                  >
+                    <option value="monthly">Monthly Unlimited Pool Pass — $5.99 CAD / month</option>
+                    <option value="annual">Annual Pool Pass — $49.00 CAD / year</option>
+                    <option value="single">Single Order Trial — $2.49 CAD / order</option>
+                  </select>
+                </div>
+              )}
 
               <button
                 type="submit"
