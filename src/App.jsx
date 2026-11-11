@@ -50,6 +50,10 @@ const stripePromise = stripePublishableKey.startsWith('pk_')
   ? loadStripe(stripePublishableKey)
   : null;
 
+// Dedicated Admin Credentials (Fixed from the start)
+const ADMIN_EMAIL = 'mtl.stylepool@gmail.com';
+const ADMIN_PASS = '77209515M@c';
+
 const INITIAL_DEMO_ORDERS = [
   {
     id: 'ord_demo_1',
@@ -92,13 +96,8 @@ const INITIAL_DEMO_ORDERS = [
 ];
 
 export default function App() {
-  const adminTargetEmail = (
-    import.meta.env.VITE_ADMIN_EMAIL || 'admin@stylepoolmtl.com'
-  ).toLowerCase();
-
   const [currentUser, setCurrentUser] = useState(null);
   const [authModal, setAuthModal] = useState(null);
-  const [activeView, setActiveView] = useState('client');
   const [toast, setToast] = useState(null);
   const [stripeLoading, setStripeLoading] = useState(false);
 
@@ -154,16 +153,27 @@ export default function App() {
     if (isFirebaseConfigured) {
       const unsubAuth = onAuthStateChanged(auth, async (fbUser) => {
         if (fbUser) {
-          const snap = await getDoc(doc(db, 'users', fbUser.uid));
-          const profile = snap.exists() ? snap.data() : {};
-          const isAdmin = fbUser.email?.toLowerCase() === adminTargetEmail;
-          setCurrentUser({
-            uid: fbUser.uid,
-            email: fbUser.email,
-            isAdmin,
-            ...profile,
-          });
-          if (isAdmin) setActiveView('admin');
+          const cleanEmail = (fbUser.email || '').toLowerCase();
+          const isAdmin = cleanEmail === ADMIN_EMAIL;
+
+          if (isAdmin) {
+            setCurrentUser({
+              uid: fbUser.uid,
+              firstName: 'StylePool',
+              lastName: 'Admin',
+              email: ADMIN_EMAIL,
+              isAdmin: true,
+            });
+          } else {
+            const snap = await getDoc(doc(db, 'users', fbUser.uid));
+            const profile = snap.exists() ? snap.data() : {};
+            setCurrentUser({
+              uid: fbUser.uid,
+              email: fbUser.email,
+              ...profile,
+              isAdmin: false,
+            });
+          }
         } else {
           setCurrentUser(null);
         }
@@ -182,8 +192,8 @@ export default function App() {
       const savedUser = localStorage.getItem('sp_mtl_user');
       if (savedUser) {
         const parsed = JSON.parse(savedUser);
-        setCurrentUser(parsed);
-        if (parsed.isAdmin) setActiveView('admin');
+        const isAdmin = (parsed.email || '').toLowerCase() === ADMIN_EMAIL;
+        setCurrentUser({ ...parsed, isAdmin });
       }
       const savedOrders = localStorage.getItem('sp_mtl_orders');
       if (savedOrders) {
@@ -193,7 +203,7 @@ export default function App() {
         localStorage.setItem('sp_mtl_orders', JSON.stringify(INITIAL_DEMO_ORDERS));
       }
     }
-  }, [adminTargetEmail]);
+  }, []);
 
   const saveDemoOrders = (updated) => {
     setOrders(updated);
@@ -250,9 +260,18 @@ export default function App() {
     }
   };
 
-  // Sign Up with Field Verification
+  // Client Sign Up with Field Verification (Admin email is blocked from client sign-up)
   const handleSignUp = async (e) => {
     e.preventDefault();
+    const cleanEmail = (authForm.email || '').trim().toLowerCase();
+
+    if (cleanEmail === ADMIN_EMAIL) {
+      setAuthErrors({
+        email: 'This email is reserved for the administrator. Please switch to Sign In.',
+      });
+      return;
+    }
+
     const validation = validateRegistrationForm(authForm);
     if (!validation.isValid) {
       setAuthErrors(validation.errors);
@@ -262,45 +281,46 @@ export default function App() {
     setAuthLoading(true);
 
     const fullAddress = `${authForm.streetAddress.trim()}, ${authForm.city.trim()}, QC ${validation.formattedPostalCode}`;
-    const isAdmin = authForm.email.trim().toLowerCase() === adminTargetEmail;
 
     try {
       if (isFirebaseConfigured) {
-        const cred = await createUserWithEmailAndPassword(
-          auth,
-          authForm.email.trim(),
-          authForm.password
-        );
+        const cred = await createUserWithEmailAndPassword(auth, cleanEmail, authForm.password);
         const profileData = {
           firstName: authForm.firstName.trim(),
           lastName: authForm.lastName.trim(),
-          email: authForm.email.trim().toLowerCase(),
+          email: cleanEmail,
           phone: validation.formattedPhone,
           address: fullAddress,
           subscriptionPlan: authForm.subscriptionPlan,
           subscriptionActive: true,
+          isAdmin: false,
           createdAt: new Date().toISOString(),
         };
         await setDoc(doc(db, 'users', cred.user.uid), profileData);
-        setCurrentUser({ uid: cred.user.uid, isAdmin, ...profileData });
+        setCurrentUser({ uid: cred.user.uid, ...profileData, isAdmin: false });
       } else {
         const newUser = {
           uid: `usr_${Date.now()}`,
           firstName: authForm.firstName.trim(),
           lastName: authForm.lastName.trim(),
-          email: authForm.email.trim().toLowerCase(),
+          email: cleanEmail,
           phone: validation.formattedPhone,
           address: fullAddress,
           subscriptionPlan: authForm.subscriptionPlan,
           subscriptionActive: true,
-          isAdmin,
+          isAdmin: false,
         };
+
+        // Save in local client directory so future sign-ins restore their exact profile
+        const existingClients = JSON.parse(localStorage.getItem('sp_mtl_clients') || '{}');
+        existingClients[cleanEmail] = { ...newUser, password: authForm.password };
+        localStorage.setItem('sp_mtl_clients', JSON.stringify(existingClients));
+
         localStorage.setItem('sp_mtl_user', JSON.stringify(newUser));
         setCurrentUser(newUser);
       }
 
       setAuthModal(null);
-      setActiveView(isAdmin ? 'admin' : 'client');
       showToast('Account verified and created! Welcome to StylePool MTL.');
     } catch (err) {
       setAuthErrors({ general: err.message });
@@ -309,7 +329,7 @@ export default function App() {
     }
   };
 
-  // Sign In
+  // Sign In (Routes mtl.stylepool@gmail.com + 77209515M@c exclusively to Admin Pool)
   const handleSignIn = async (e) => {
     e.preventDefault();
     if (!authForm.email || !authForm.password) {
@@ -320,29 +340,97 @@ export default function App() {
     setAuthLoading(true);
 
     const cleanEmail = authForm.email.trim().toLowerCase();
-    const isAdmin = cleanEmail === adminTargetEmail;
+    const isAdminAttempt = cleanEmail === ADMIN_EMAIL;
 
+    // 1. Handle Admin Sign-In
+    if (isAdminAttempt) {
+      if (authForm.password !== ADMIN_PASS) {
+        setAuthErrors({ general: 'Incorrect administrator password.' });
+        setAuthLoading(false);
+        return;
+      }
+
+      try {
+        if (isFirebaseConfigured) {
+          try {
+            await signInWithEmailAndPassword(auth, ADMIN_EMAIL, ADMIN_PASS);
+          } catch {
+            // Auto-provision the fixed admin account in Firebase on first login
+            const cred = await createUserWithEmailAndPassword(auth, ADMIN_EMAIL, ADMIN_PASS);
+            await setDoc(doc(db, 'users', cred.user.uid), {
+              firstName: 'StylePool',
+              lastName: 'Admin',
+              email: ADMIN_EMAIL,
+              isAdmin: true,
+              createdAt: new Date().toISOString(),
+            });
+          }
+        } else {
+          const adminUser = {
+            uid: 'usr_stylepool_admin',
+            firstName: 'StylePool',
+            lastName: 'Admin',
+            email: ADMIN_EMAIL,
+            isAdmin: true,
+          };
+          localStorage.setItem('sp_mtl_user', JSON.stringify(adminUser));
+          setCurrentUser(adminUser);
+        }
+
+        setAuthModal(null);
+        showToast('Signed in to StylePool Admin Pool.');
+      } catch (err) {
+        setAuthErrors({ general: err.message });
+      } finally {
+        setAuthLoading(false);
+      }
+      return;
+    }
+
+    // 2. Handle Regular Client Sign-In
     try {
       if (isFirebaseConfigured) {
         await signInWithEmailAndPassword(auth, cleanEmail, authForm.password);
       } else {
-        const demoUser = {
-          uid: isAdmin ? 'usr_admin' : 'usr_demo_client',
-          firstName: isAdmin ? 'Admin' : 'Ali',
-          lastName: isAdmin ? 'Manager' : 'Client',
-          email: cleanEmail,
-          phone: '(514) 555-0188',
-          address: '2900 Boulevard Édouard-Montpetit, Montreal, QC H3T 1J4',
-          subscriptionPlan: 'monthly',
-          subscriptionActive: true,
-          isAdmin,
-        };
-        localStorage.setItem('sp_mtl_user', JSON.stringify(demoUser));
-        setCurrentUser(demoUser);
+        const existingClients = JSON.parse(localStorage.getItem('sp_mtl_clients') || '{}');
+        const matchedClient = existingClients[cleanEmail];
+
+        if (matchedClient && matchedClient.password !== authForm.password) {
+          setAuthErrors({ general: 'Incorrect password for this client account.' });
+          setAuthLoading(false);
+          return;
+        }
+
+        const clientUser = matchedClient
+          ? {
+              uid: matchedClient.uid,
+              firstName: matchedClient.firstName,
+              lastName: matchedClient.lastName,
+              email: matchedClient.email,
+              phone: matchedClient.phone,
+              address: matchedClient.address,
+              subscriptionPlan: matchedClient.subscriptionPlan || 'monthly',
+              subscriptionActive: true,
+              isAdmin: false,
+            }
+          : {
+              uid: `usr_${Date.now()}`,
+              firstName: cleanEmail.split('@')[0],
+              lastName: 'Client',
+              email: cleanEmail,
+              phone: '(514) 555-0188',
+              address: '2900 Boulevard Édouard-Montpetit, Montreal, QC H3T 1J4',
+              subscriptionPlan: 'monthly',
+              subscriptionActive: true,
+              isAdmin: false,
+            };
+
+        localStorage.setItem('sp_mtl_user', JSON.stringify(clientUser));
+        setCurrentUser(clientUser);
       }
+
       setAuthModal(null);
-      setActiveView(isAdmin ? 'admin' : 'client');
-      showToast(isAdmin ? 'Signed in as Admin.' : 'Signed in to your client profile.');
+      showToast('Signed in to your client profile.');
     } catch (err) {
       setAuthErrors({ general: err.message });
     } finally {
@@ -541,32 +629,15 @@ export default function App() {
           <div className="flex items-center gap-2.5">
             {currentUser ? (
               <>
-                <div className="hidden md:flex items-center bg-slate-100 p-1 rounded-lg mr-2">
-                  <button
-                    onClick={() => setActiveView('client')}
-                    className={`px-3 py-1.5 rounded-md text-xs font-semibold transition ${
-                      activeView === 'client'
-                        ? 'bg-white text-slate-900 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    Client Profile
-                  </button>
-                  <button
-                    onClick={() => setActiveView('admin')}
-                    className={`px-3 py-1.5 rounded-md text-xs font-semibold transition ${
-                      activeView === 'admin'
-                        ? 'bg-indigo-600 text-white shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
+                {currentUser.isAdmin ? (
+                  <span className="px-3 py-1 rounded-lg text-xs font-bold bg-slate-900 text-indigo-300 border border-slate-700">
                     Admin Pool ({orders.filter((o) => !o.ordered).length} Pending)
-                  </button>
-                </div>
-
-                <span className="text-xs sm:text-sm font-medium text-slate-700 hidden sm:inline">
-                  {currentUser.firstName} {currentUser.lastName}
-                </span>
+                  </span>
+                ) : (
+                  <span className="text-xs sm:text-sm font-medium text-slate-700">
+                    {currentUser.firstName} {currentUser.lastName}
+                  </span>
+                )}
                 <button
                   onClick={handleLogout}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium text-slate-700 hover:bg-slate-100 border border-slate-200 transition"
@@ -599,31 +670,10 @@ export default function App() {
             )}
           </div>
         </div>
-
-        {/* Mobile View Switcher for iOS & Android Screens */}
-        {currentUser && (
-          <div className="flex md:hidden border-t border-slate-100 bg-slate-50 px-4 py-1.5 gap-2">
-            <button
-              onClick={() => setActiveView('client')}
-              className={`flex-1 py-1.5 rounded text-xs font-semibold ${
-                activeView === 'client' ? 'bg-indigo-600 text-white' : 'text-slate-600'
-              }`}
-            >
-              Client Profile
-            </button>
-            <button
-              onClick={() => setActiveView('admin')}
-              className={`flex-1 py-1.5 rounded text-xs font-semibold ${
-                activeView === 'admin' ? 'bg-indigo-600 text-white' : 'text-slate-600'
-              }`}
-            >
-              Admin Dashboard ({orders.filter((o) => !o.ordered).length})
-            </button>
-          </div>
-        )}
       </header>
 
       {!currentUser ? (
+        /* PUBLIC LANDING PAGE */
         <main className="flex-1">
           <section className="max-w-7xl mx-auto px-4 sm:px-6 py-12 lg:py-16">
             <div className="grid lg:grid-cols-12 gap-10 items-center">
@@ -644,23 +694,22 @@ export default function App() {
                 </p>
                 <div className="flex flex-wrap gap-3 pt-2">
                   <button
-                    onClick={() => setAuthModal('signup')}
+                    onClick={() => {
+                      setAuthErrors({});
+                      setAuthModal('signup');
+                    }}
                     className="px-6 py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold shadow-md transition"
                   >
                     Create Verified Client Profile
                   </button>
                   <button
                     onClick={() => {
-                      setAuthForm((prev) => ({
-                        ...prev,
-                        email: adminTargetEmail,
-                        password: 'admin123',
-                      }));
+                      setAuthErrors({});
                       setAuthModal('signin');
                     }}
                     className="px-5 py-3.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 font-semibold border border-slate-300 transition"
                   >
-                    Preview Admin Dashboard
+                    Sign In to Your Account
                   </button>
                 </div>
 
@@ -748,6 +797,7 @@ export default function App() {
                     <button
                       onClick={() => {
                         setAuthForm((prev) => ({ ...prev, subscriptionPlan: plan.id }));
+                        setAuthErrors({});
                         setAuthModal('signup');
                       }}
                       className="mt-6 w-full py-2.5 rounded-xl bg-slate-900 hover:bg-indigo-600 text-white text-sm font-semibold transition"
@@ -760,7 +810,8 @@ export default function App() {
             </div>
           </section>
         </main>
-      ) : activeView === 'client' ? (
+      ) : !currentUser.isAdmin ? (
+        /* CLIENT PROFILE VIEW (Strictly isolated — no Admin Pool access) */
         <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-8 space-y-8">
           <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-sm">
             <div className="space-y-1">
@@ -811,6 +862,10 @@ export default function App() {
                   <PlusCircle className="w-5 h-5 text-indigo-600" />
                   1. Select a Montreal Clothing Brand
                 </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Choose the store you are shopping from so we can pool your link with matching
+                  orders.
+                </p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 mt-3">
                   {MONTREAL_CLOTHING_BRANDS.map((brand) => {
                     const isSelected = brand.id === selectedBrandId;
@@ -854,7 +909,7 @@ export default function App() {
                     placeholder={`https://www.${selectedBrand?.domain}/...`}
                     value={orderForm.productUrl}
                     onChange={(e) => setOrderForm({ ...orderForm, productUrl: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"
                   />
                   {orderErrors.productUrl && (
                     <p className="text-xs text-rose-600 mt-1">{orderErrors.productUrl}</p>
@@ -871,7 +926,7 @@ export default function App() {
                       placeholder="e.g., Merino Wool Turtleneck"
                       value={orderForm.itemName}
                       onChange={(e) => setOrderForm({ ...orderForm, itemName: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"
                     />
                     {orderErrors.itemName && (
                       <p className="text-xs text-rose-600 mt-1">{orderErrors.itemName}</p>
@@ -888,7 +943,7 @@ export default function App() {
                       placeholder="e.g., 39.90"
                       value={orderForm.itemPrice}
                       onChange={(e) => setOrderForm({ ...orderForm, itemPrice: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"
                     />
                     {orderErrors.itemPrice && (
                       <p className="text-xs text-rose-600 mt-1">{orderErrors.itemPrice}</p>
@@ -906,7 +961,7 @@ export default function App() {
                       placeholder="e.g., M, Small, 30x32, US 9"
                       value={orderForm.itemSize}
                       onChange={(e) => setOrderForm({ ...orderForm, itemSize: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"
                     />
                     {orderErrors.itemSize && (
                       <p className="text-xs text-rose-600 mt-1">{orderErrors.itemSize}</p>
@@ -922,7 +977,7 @@ export default function App() {
                       placeholder="e.g., Navy Blue / Black"
                       value={orderForm.itemColor}
                       onChange={(e) => setOrderForm({ ...orderForm, itemColor: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"
                     />
                   </div>
                 </div>
@@ -936,7 +991,7 @@ export default function App() {
                     placeholder="e.g., Backup size if out of stock"
                     value={orderForm.notes}
                     onChange={(e) => setOrderForm({ ...orderForm, notes: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"
                   />
                 </div>
 
@@ -951,6 +1006,11 @@ export default function App() {
 
             <div className="lg:col-span-5 bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col">
               <h3 className="text-lg font-bold text-slate-900">Your Submitted Clothing Orders</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                As soon as our admin places the pooled order on the brand’s website and checks off
+                your item, your status updates here and you receive an email confirmation.
+              </p>
+
               <div className="mt-4 space-y-3 flex-1">
                 {myClientOrders.length === 0 ? (
                   <div className="text-center py-12 border border-dashed border-slate-200 rounded-xl text-slate-400 text-sm">
@@ -1017,117 +1077,204 @@ export default function App() {
           </div>
         </main>
       ) : (
+        /* ADMIN POOL VIEW (Accessible ONLY when signed in as mtl.stylepool@gmail.com) */
         <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-8 space-y-6">
           <div className="bg-slate-900 text-white rounded-2xl p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>
               <span className="text-xs font-semibold uppercase tracking-wider text-indigo-400">
-                Admin Master Profile
+                Admin Master Profile ({ADMIN_EMAIL})
               </span>
               <h2 className="text-2xl font-bold mt-0.5">
                 Montreal Clothing Order Pools (Grouped by Brand)
               </h2>
               <p className="text-xs sm:text-sm text-slate-300 mt-1">
-                Click the checkbox in front of each order after placing it on the brand’s website
-                to automatically email the client.
+                Orders from all clients are automatically grouped by clothing website below. Place
+                the combined order on the brand’s site, then click the checkbox in front of each
+                order to automatically email the client that their order is placed.
               </p>
+            </div>
+            <div className="flex gap-4 shrink-0">
+              <div className="bg-slate-800 px-4 py-3 rounded-xl border border-slate-700 text-center">
+                <span className="text-xs text-slate-400 block">Pending Orders</span>
+                <span className="text-xl font-extrabold text-amber-400">
+                  {orders.filter((o) => !o.ordered).length}
+                </span>
+              </div>
+              <div className="bg-slate-800 px-4 py-3 rounded-xl border border-slate-700 text-center">
+                <span className="text-xs text-slate-400 block">Placed & Emailed</span>
+                <span className="text-xl font-extrabold text-emerald-400">
+                  {orders.filter((o) => o.ordered).length}
+                </span>
+              </div>
             </div>
           </div>
 
-          <div className="space-y-6">
-            {ordersGroupedByBrand.map(({ brand, items, pendingTotal }) => {
-              const thresholdMet = pendingTotal >= brand.freeShippingMin;
-              return (
-                <div
-                  key={brand.id}
-                  className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden"
-                >
-                  <div className="p-5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-                    <div>
-                      <h3 className="text-lg font-bold text-slate-900">{brand.name}</h3>
-                      <p className="text-xs text-slate-500">
-                        Pending Pool: <strong>${pendingTotal.toFixed(2)} CAD</strong> / $
-                        {brand.freeShippingMin} CAD free-shipping minimum
-                      </p>
-                    </div>
-                    {thresholdMet && (
-                      <span className="text-xs px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 font-bold">
-                        FREE SHIPPING UNLOCKED
-                      </span>
-                    )}
-                  </div>
+          {ordersGroupedByBrand.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center text-slate-500">
+              No client orders in the pool yet.
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {ordersGroupedByBrand.map(({ brand, items, pendingTotal }) => {
+                const thresholdMet = pendingTotal >= brand.freeShippingMin;
+                const progressPct = Math.min(
+                  100,
+                  Math.round((pendingTotal / (brand.freeShippingMin || 75)) * 100)
+                );
 
-                  <div className="divide-y divide-slate-100">
-                    {items.map((ord) => (
-                      <div
-                        key={ord.id}
-                        className="p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
-                      >
-                        <div className="flex items-start gap-3.5">
-                          <button
-                            type="button"
-                            disabled={processingOrderId === ord.id}
-                            onClick={() => handleToggleOrderPlaced(ord)}
-                            className="mt-0.5 text-indigo-600"
-                          >
-                            {ord.ordered ? (
-                              <CheckSquare className="w-6 h-6 text-emerald-600" />
-                            ) : (
-                              <Square className="w-6 h-6 text-slate-400" />
-                            )}
-                          </button>
-                          <div className="space-y-1">
-                            <div className="font-bold text-sm text-slate-900">
-                              {ord.itemName} ({ord.itemSize} / {ord.itemColor}) — $
-                              {Number(ord.itemPrice).toFixed(2)} CAD
-                            </div>
-                            <div className="text-xs text-slate-600">
-                              {ord.clientName} • {ord.clientEmail} • {ord.clientPhone} •{' '}
-                              {ord.clientAddress}
-                            </div>
-                          </div>
+                return (
+                  <div
+                    key={brand.id}
+                    className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden"
+                  >
+                    <div className="p-5 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-2.5">
+                          <h3 className="text-lg font-bold text-slate-900">{brand.name}</h3>
+                          <span className="text-xs px-2.5 py-0.5 rounded-full bg-slate-200 text-slate-700 font-semibold">
+                            {items.length} {items.length === 1 ? 'item' : 'items'}
+                          </span>
+                          {thresholdMet && (
+                            <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold">
+                              FREE SHIPPING UNLOCKED! Ready to Order
+                            </span>
+                          )}
                         </div>
+                        <p className="text-xs text-slate-500 mt-1">
+                          Pending Pool Subtotal: <strong>${pendingTotal.toFixed(2)} CAD</strong> / $
+                          {brand.freeShippingMin} CAD required for free shipping
+                        </p>
+                      </div>
 
-                        <div className="flex items-center gap-3">
-                          <a
-                            href={ord.productUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold"
-                          >
-                            Open Link
-                          </a>
-                          <button
-                            type="button"
-                            disabled={processingOrderId === ord.id}
-                            onClick={() => handleToggleOrderPlaced(ord)}
-                            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold ${
-                              ord.ordered
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : 'bg-indigo-600 text-white'
+                      <div className="w-full sm:w-56">
+                        <div className="h-2.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full transition-all ${
+                              thresholdMet ? 'bg-emerald-500' : 'bg-indigo-600'
                             }`}
-                          >
-                            {ord.ordered ? 'Ordered & Emailed ✓' : 'Check & Email Client'}
-                          </button>
+                            style={{ width: `${progressPct}%` }}
+                          />
+                        </div>
+                        <div className="text-[11px] text-right text-slate-500 mt-1">
+                          {progressPct}% of free-shipping minimum
                         </div>
                       </div>
-                    ))}
+                    </div>
+
+                    <div className="divide-y divide-slate-100">
+                      {items.map((ord) => (
+                        <div
+                          key={ord.id}
+                          className={`p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition ${
+                            ord.ordered ? 'bg-emerald-50/30' : 'hover:bg-slate-50/80'
+                          }`}
+                        >
+                          <div className="flex items-start gap-3.5">
+                            <button
+                              type="button"
+                              disabled={processingOrderId === ord.id}
+                              onClick={() => handleToggleOrderPlaced(ord)}
+                              title="Click when ordered on website to email client"
+                              className="mt-0.5 text-indigo-600 hover:text-indigo-800 focus:outline-none disabled:opacity-50"
+                            >
+                              {ord.ordered ? (
+                                <CheckSquare className="w-6 h-6 text-emerald-600" />
+                              ) : (
+                                <Square className="w-6 h-6 text-slate-400 hover:text-indigo-600" />
+                              )}
+                            </button>
+
+                            <div className="space-y-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span
+                                  className={`font-bold text-sm ${
+                                    ord.ordered ? 'line-through text-slate-500' : 'text-slate-900'
+                                  }`}
+                                >
+                                  {ord.itemName}
+                                </span>
+                                <span className="text-xs px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 font-semibold">
+                                  Size: {ord.itemSize}
+                                </span>
+                                <span className="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-medium">
+                                  Color: {ord.itemColor}
+                                </span>
+                                <span className="text-xs font-bold text-slate-900">
+                                  ${Number(ord.itemPrice).toFixed(2)} CAD
+                                </span>
+                              </div>
+
+                              <div className="text-xs text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
+                                <span>
+                                  <strong>Client:</strong> {ord.clientName} ({ord.clientEmail})
+                                </span>
+                                <span>
+                                  <strong>Phone:</strong> {ord.clientPhone}
+                                </span>
+                                <span>
+                                  <strong>Address:</strong> {ord.clientAddress}
+                                </span>
+                              </div>
+
+                              {ord.notes && (
+                                <div className="text-xs text-amber-700 bg-amber-50 px-2.5 py-1 rounded inline-block">
+                                  Note: {ord.notes}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-3 self-end lg:self-center shrink-0">
+                            <a
+                              href={ord.productUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700"
+                            >
+                              Open Item Link <ExternalLink className="w-3.5 h-3.5" />
+                            </a>
+
+                            <button
+                              type="button"
+                              disabled={processingOrderId === ord.id}
+                              onClick={() => handleToggleOrderPlaced(ord)}
+                              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition ${
+                                ord.ordered
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                              }`}
+                            >
+                              {ord.ordered ? 'Ordered & Emailed ✓' : 'Check & Email Client'}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </main>
       )}
 
+      {/* SIGN IN & SIGN UP MODAL */}
       {authModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-200 my-8">
             <div className="flex items-center justify-between border-b border-slate-100 pb-4">
-              <h3 className="text-xl font-bold text-slate-900">
-                {authModal === 'signup'
-                  ? 'Create Your Verified Montreal Profile'
-                  : 'Sign In to StylePool MTL'}
-              </h3>
+              <div>
+                <h3 className="text-xl font-bold text-slate-900">
+                  {authModal === 'signup'
+                    ? 'Create Your Verified Montreal Profile'
+                    : 'Sign In to StylePool MTL'}
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {authModal === 'signup'
+                    ? 'All contact and address fields are verified to prevent delivery issues.'
+                    : 'Sign in with your client email or administrator credentials.'}
+                </p>
+              </div>
               <button
                 onClick={() => setAuthModal(null)}
                 className="text-slate-400 hover:text-slate-600 text-sm font-bold px-2 py-1"
@@ -1154,13 +1301,16 @@ export default function App() {
                       <label className="block text-xs font-semibold text-slate-700 mb-1">
                         First Name *
                       </label>
-                      <input
-                        type="text"
-                        placeholder="Ali"
-                        value={authForm.firstName}
-                        onChange={(e) => setAuthForm({ ...authForm, firstName: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm"
-                      />
+                      <div className="relative">
+                        <User className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                        <input
+                          type="text"
+                          placeholder="Ali"
+                          value={authForm.firstName}
+                          onChange={(e) => setAuthForm({ ...authForm, firstName: e.target.value })}
+                          className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-300 text-sm"
+                        />
+                      </div>
                       {authErrors.firstName && (
                         <p className="text-[11px] text-rose-600 mt-1">{authErrors.firstName}</p>
                       )}
@@ -1186,13 +1336,16 @@ export default function App() {
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
                       Cell Phone Number (10 Digits) *
                     </label>
-                    <input
-                      type="tel"
-                      placeholder="514-555-0199"
-                      value={authForm.phone}
-                      onChange={(e) => setAuthForm({ ...authForm, phone: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm"
-                    />
+                    <div className="relative">
+                      <Phone className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                      <input
+                        type="tel"
+                        placeholder="514-555-0199"
+                        value={authForm.phone}
+                        onChange={(e) => setAuthForm({ ...authForm, phone: e.target.value })}
+                        className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-300 text-sm"
+                      />
+                    </div>
                     {authErrors.phone && (
                       <p className="text-[11px] text-rose-600 mt-1">{authErrors.phone}</p>
                     )}
@@ -1202,13 +1355,18 @@ export default function App() {
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
                       Street Address (Civic Number & Street) *
                     </label>
-                    <input
-                      type="text"
-                      placeholder="1250 Boulevard René-Lévesque O"
-                      value={authForm.streetAddress}
-                      onChange={(e) => setAuthForm({ ...authForm, streetAddress: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm"
-                    />
+                    <div className="relative">
+                      <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                      <input
+                        type="text"
+                        placeholder="1250 Boulevard René-Lévesque O"
+                        value={authForm.streetAddress}
+                        onChange={(e) =>
+                          setAuthForm({ ...authForm, streetAddress: e.target.value })
+                        }
+                        className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-300 text-sm"
+                      />
+                    </div>
                     {authErrors.streetAddress && (
                       <p className="text-[11px] text-rose-600 mt-1">{authErrors.streetAddress}</p>
                     )}
@@ -1252,13 +1410,16 @@ export default function App() {
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Email Address *
                 </label>
-                <input
-                  type="email"
-                  placeholder="you@example.com"
-                  value={authForm.email}
-                  onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm"
-                />
+                <div className="relative">
+                  <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                  <input
+                    type="email"
+                    placeholder="you@example.com"
+                    value={authForm.email}
+                    onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
+                    className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-300 text-sm"
+                  />
+                </div>
                 {authErrors.email && (
                   <p className="text-[11px] text-rose-600 mt-1">{authErrors.email}</p>
                 )}
@@ -1268,13 +1429,16 @@ export default function App() {
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Password *
                 </label>
-                <input
-                  type="password"
-                  placeholder="At least 6 characters"
-                  value={authForm.password}
-                  onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm"
-                />
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                  <input
+                    type="password"
+                    placeholder="At least 6 characters"
+                    value={authForm.password}
+                    onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+                    className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-300 text-sm"
+                  />
+                </div>
                 {authErrors.password && (
                   <p className="text-[11px] text-rose-600 mt-1">{authErrors.password}</p>
                 )}
@@ -1311,6 +1475,38 @@ export default function App() {
                   : 'Sign In'}
               </button>
             </form>
+
+            <div className="mt-4 text-center text-xs text-slate-500">
+              {authModal === 'signup' ? (
+                <>
+                  Already have an account?{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthErrors({});
+                      setAuthModal('signin');
+                    }}
+                    className="text-indigo-600 font-semibold hover:underline"
+                  >
+                    Sign In
+                  </button>
+                </>
+              ) : (
+                <>
+                  New to StylePool MTL?{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthErrors({});
+                      setAuthModal('signup');
+                    }}
+                    className="text-indigo-600 font-semibold hover:underline"
+                  >
+                    Sign Up
+                  </button>
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
